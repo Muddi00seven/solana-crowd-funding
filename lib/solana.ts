@@ -27,6 +27,7 @@ import {
   SYSVAR_RENT_PUBKEY,
   clusterApiUrl,
 } from '@solana/web3.js'
+import type { IdlAccounts } from '@coral-xyz/anchor'
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
@@ -117,4 +118,87 @@ export function deriveContributionPda(campaign: PublicKey, contributor: PublicKe
     [Buffer.from('contribution'), campaign.toBuffer(), contributor.toBuffer()],
     PROGRAM_ID
   )
+}
+
+// ─── Decoded account shapes ─────────────────────────────────────────────────
+// Derived straight from the IDL's types[] entries - these are what
+// program.account.campaign.fetch()/.all() and the `contribution` equivalent
+// actually resolve to (camelCase fields, BN for every u64/i64).
+export type CampaignAccount = IdlAccounts<Crowdfunding>['campaign']
+export type ContributionAccount = IdlAccounts<Crowdfunding>['contribution']
+
+export interface ProgramAccountEntry<T> {
+  publicKey: PublicKey
+  account: T
+}
+
+// ─── Read-only program client ───────────────────────────────────────────────
+// Browsing campaigns shouldn't require a connected wallet - only writes
+// (create/contribute/withdraw/claimRefund) need a real signer. Anchor's
+// account-fetch methods (.fetch()/.all()) never touch provider.wallet, so a
+// stub wallet that only throws if something ever tries to sign with it is
+// safe here (same reasoning as the AnchorWallet -> Wallet cast in
+// getProgram() above).
+const READ_ONLY_WALLET = {
+  publicKey: SystemProgram.programId,
+  signTransaction: async () => {
+    throw new Error('This is a read-only connection - connect a wallet to sign transactions')
+  },
+  signAllTransactions: async () => {
+    throw new Error('This is a read-only connection - connect a wallet to sign transactions')
+  },
+} as unknown as Wallet
+
+export function getReadOnlyProgram(connection: Connection = getReadConnection()): CrowdfundingProgram {
+  const provider = new AnchorProvider(connection, READ_ONLY_WALLET, { commitment: 'confirmed' })
+  return new Program<Crowdfunding>(IDL, provider)
+}
+
+/** Every Campaign account on the program, newest first (by campaignId). No wallet needed. */
+export async function fetchAllCampaigns(
+  connection?: Connection
+): Promise<ProgramAccountEntry<CampaignAccount>[]> {
+  const program = getReadOnlyProgram(connection)
+  const all = await program.account.campaign.all()
+  return all
+    .map(({ publicKey, account }) => ({ publicKey, account: account as CampaignAccount }))
+    .sort((a, b) => b.account.campaignId.cmp(a.account.campaignId))
+}
+
+/** One Campaign account by its PDA address. No wallet needed. */
+export async function fetchCampaign(
+  campaignPda: PublicKey,
+  connection?: Connection
+): Promise<CampaignAccount> {
+  const program = getReadOnlyProgram(connection)
+  return (await program.account.campaign.fetch(campaignPda)) as CampaignAccount
+}
+
+/** Every Contribution PDA belonging to one campaign. No wallet needed. */
+export async function fetchContributionsForCampaign(
+  campaignPda: PublicKey,
+  connection?: Connection
+): Promise<ProgramAccountEntry<ContributionAccount>[]> {
+  const program = getReadOnlyProgram(connection)
+  const discFilter = program.coder.accounts.memcmp('contribution')
+  const accounts = await program.provider.connection.getProgramAccounts(program.programId, {
+    filters: [
+      { memcmp: { offset: 0, bytes: discFilter.bytes } },
+      { memcmp: { offset: 8, bytes: campaignPda.toBase58() } }, // `campaign` field
+    ],
+  })
+  return accounts.map(({ pubkey, account }) => ({
+    publicKey: pubkey,
+    account: program.coder.accounts.decode('contribution', account.data) as ContributionAccount,
+  }))
+}
+
+// ─── Campaign status classification ─────────────────────────────────────────
+export type CampaignStatus = 'active' | 'goalReached' | 'expired'
+
+export function getCampaignStatus(campaign: CampaignAccount): CampaignStatus {
+  if (campaign.raised.gte(campaign.goal)) return 'goalReached'
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (nowSec >= campaign.deadline.toNumber()) return 'expired'
+  return 'active'
 }

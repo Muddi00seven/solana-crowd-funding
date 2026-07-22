@@ -17,10 +17,12 @@
 
 import { useMemo } from 'react'
 import { Buffer } from 'buffer'
+import { Toaster } from 'sonner'
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react'
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui'
 
 import { RPC_URL } from '@/lib/solana'
+import { TransactionOverlay } from '@/components/TransactionOverlay'
 
 import '@solana/wallet-adapter-react-ui/styles.css'
 
@@ -36,7 +38,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ConnectionProvider endpoint={RPC_URL}>
       <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>{children}</WalletModalProvider>
+        <WalletModalProvider>
+          {children}
+          <TransactionOverlay />
+          <Toaster theme="dark" position="bottom-right" richColors closeButton />
+        </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   )

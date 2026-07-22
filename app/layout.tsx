@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { Space_Grotesk, JetBrains_Mono } from 'next/font/google'
 import dynamic from 'next/dynamic'
+import { Navbar } from '@/components/Navbar'
 import './globals.css'
 
 const spaceGrotesk = Space_Grotesk({
@@ -21,15 +22,18 @@ const Providers = dynamic(
 )
 
 export const metadata: Metadata = {
-  title: 'Wallet Connect',
-  description: 'Connect your Solana wallet and interact with the crowdfunding program (devnet)',
+  title: 'ChainFund — Solana Crowdfunding',
+  description: 'Transparent, non-custodial crowdfunding on Solana devnet',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
       <body className={`${spaceGrotesk.variable} ${jetbrainsMono.variable} font-sans bg-background text-foreground antialiased`}>
-        <Providers>{children}</Providers>
+        <Providers>
+          <Navbar />
+          {children}
+        </Providers>
       </body>
     </html>
   )
