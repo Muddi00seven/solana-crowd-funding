@@ -2,7 +2,7 @@
 
 A decentralized, non-custodial crowdfunding dApp — campaigns are funded in an SPL token, held by a program-owned vault, and released only when on-chain rules are satisfied. No middleman ever touches the money.
 
-This project began as an Ethereum/Solidity app (`ethers.js` + Reown AppKit + a `CrowdFunding.sol` contract on Sepolia). It has since been **fully migrated to Solana**: the frontend now talks to a live Anchor program on **devnet**, and every EVM-specific piece (ethers, AppKit, WalletConnect, the approve→transferFrom flow) has been replaced with its Solana equivalent. This README documents the app **as it exists today** — the Solana/Anchor version.
+This project began as an Ethereum/Solidity app (`ethers.js` + Reown AppKit + a `CrowdFunding.sol` contract on Sepolia). It has since been **fully migrated to Solana**: the frontend now talks to a live Anchor program on **devnet**, and every EVM-specific piece (ethers, AppKit, WalletConnect, the approve→transferFrom flow) has been replaced with its Solana equivalent. On top of that migration, the UI was rebuilt from a single raw instruction panel into a proper multi-screen app — a card grid with status tabs, a guided create-campaign form, a full campaign detail page, and a "my campaigns" view — while the original raw panel is kept at `/debug` for direct testing. This README documents the app **as it exists today**.
 
 > Looking for the old Ethereum version's docs? See the "What Changed / Legacy Docs" section near the bottom — `readme2.md` and `WORKFLOW.md` still describe the retired EVM build and have not been rewritten line-by-line, only flagged.
 
@@ -202,28 +202,65 @@ If a transaction fails, the wallet-signed error surfaces in `WriteFunctions.tsx`
 
 ## 5. Frontend Architecture
 
+The app has two layers on top of the program: a set of **screens** (the card grid, create form, detail page, "my campaigns") that a normal visitor uses, and a raw **`/debug` console** (the original bare-bones panel) kept around for testing instructions directly. Both talk to the same `lib/solana.ts` client.
+
 ```
 app/
-  layout.tsx           ← metadata + font setup; wraps everything in <Providers ssr:false>
-  page.tsx             ← renders <WalletConnect /> centered on the page
+  layout.tsx                  ← metadata/fonts; <Providers ssr:false> wraps <Navbar/> + {children}
+  page.tsx                    ← "/" — <CampaignGrid /> (the home screen)
+  campaigns/
+    create/page.tsx           ← "/campaigns/create" — <CreateCampaignForm />
+    mine/page.tsx              ← "/campaigns/mine" — <CampaignGrid onlyCreator={wallet} />
+    [address]/page.tsx         ← "/campaigns/:address" — <CampaignDetail address />
+  debug/page.tsx               ← "/debug" — the original raw instruction console
 
 components/
-  Providers.tsx        ← ConnectionProvider + WalletProvider + WalletModalProvider (wallet-adapter)
-  WalletConnect.tsx     ← connect button / SOL balance / renders Read+Write panels
+  Providers.tsx                ← ConnectionProvider + WalletProvider + WalletModalProvider,
+                                  renders <TransactionOverlay/> + <Toaster/> for the whole app
+  Navbar.tsx                   ← top nav (Campaigns / Create / My Campaigns) + <WalletButton/>
+  WalletButton.tsx              ← compact balance+address chip → dialog (Explorer link, disconnect)
+  TransactionOverlay.tsx        ← full-screen "signing/confirming" overlay, driven by store/transactionStore.ts
+  WalletConnect.tsx              ← legacy full-page wallet gate + raw Read/Write panels — now only
+                                    rendered by app/debug/page.tsx, not part of the main flow
+  campaigns/
+    CampaignGrid.tsx            ← tab bar (All / Still Going / Goal Reached / Expired) + card grid
+    CampaignCard.tsx             ← one campaign summary card
+    CampaignCardSkeleton.tsx     ← loading placeholder for CampaignGrid
+    CampaignDetail.tsx            ← full detail screen: stats, contribute box, conditional
+                                     withdraw/claim-refund actions, contributions list
+    CreateCampaignForm.tsx        ← react-hook-form + zod campaign creation form
+    ContributionsList.tsx          ← contribution rows for CampaignDetail
+    StatusBadge.tsx                ← "Still Going" / "Goal Reached" / "Expired" pill
   contract/
-    ReadFunctions.tsx   ← getCampaign / getContributions / listMyCampaigns
-    WriteFunctions.tsx  ← createCampaign / contribute / withdraw / claimRefund
-  ui/                   ← shadcn/ui primitives (button, card, dialog, input, ...)
+    ReadFunctions.tsx            ← raw getCampaign / getContributions / listMyCampaigns (debug console)
+    WriteFunctions.tsx            ← raw createCampaign / contribute / withdraw / claimRefund (debug console)
+  ui/                             ← shadcn/ui primitives (button, card, dialog, input, progress, ...)
+
+hooks/
+  useCampaigns.ts                ← every Campaign account (read-only, no wallet needed) — CampaignGrid
+  useCampaign.ts                  ← one Campaign by address (read-only) — CampaignDetail
+  useContributions.ts              ← every Contribution for a campaign (read-only) — CampaignDetail
+  useCreateCampaign.ts              ← wraps createCampaign() with toasts + refresh
+  useContribute.ts                   ← wraps contribute() with toasts + refresh
+  useWithdraw.ts                      ← wraps withdraw() with toasts + refresh
+  useClaimRefund.ts                    ← wraps claimRefund() with toasts + refresh
+
+store/
+  transactionStore.ts             ← zustand: isPending/message/txSignature (drives TransactionOverlay)
+                                     + refreshTrigger (every read hook refetches when a write succeeds)
 
 lib/
-  solana.ts             ← Program client factory, constants, PDA derivation helpers
-  format.ts             ← BN ⇄ human-readable token amount + date formatting
-  utils.ts              ← cn(), truncateAddress, getProgress, getDaysLeft, timeAgo
+  solana.ts                       ← Program client factories (signing + read-only), constants, PDA helpers,
+                                     fetchAllCampaigns/fetchCampaign/fetchContributionsForCampaign, getCampaignStatus
+  format.ts                       ← BN ⇄ human-readable token amount + date formatting
+  utils.ts                        ← cn(), truncateAddress, getProgress, getDaysLeft, timeAgo (all BN-aware),
+                                     isValidTokenAmount
+  validations.ts                  ← zod schemas mirroring the program's on-chain constraints
   idl/
-    crowdfunding.ts     ← hand-authored Anchor IDL (see 5.1)
+    crowdfunding.ts               ← hand-authored Anchor IDL (see 5.1)
 
-.env.local.example      ← template for the env vars in Section 3
-next.config.mjs         ← webpack fallback tweak for the buffer polyfill
+.env.local.example                ← template for the env vars in Section 3
+next.config.mjs                   ← webpack fallback tweak for the buffer polyfill
 ```
 
 ### 5.1 Why the IDL is hand-written
@@ -238,7 +275,7 @@ Normally `anchor build` generates `target/idl/crowdfunding.json` (and a matching
 
 If you ever regenerate a real IDL from a working `anchor build`, it should be a drop-in replacement for this file as long as the field names stay consistent (or you rename them to camelCase the same way).
 
-### 5.2 `lib/solana.ts` — the Program client
+### 5.2 `lib/solana.ts` — two Program clients
 
 ```ts
 export function getProgram(wallet: AnchorWallet, connection: Connection): CrowdfundingProgram {
@@ -249,22 +286,54 @@ export function getProgram(wallet: AnchorWallet, connection: Connection): Crowdf
 
 `useAnchorWallet()` (from wallet-adapter-react) gives you `{publicKey, signTransaction, signAllTransactions}` — real wallets never expose a raw private key, so there's no `payer` field the way Anchor's own `Wallet` type expects. The cast above is safe because `AnchorProvider` never actually touches `.payer` for any call this app makes (`.rpc()` / `.instruction()` / `.fetch()` only need `signTransaction`).
 
-This same file exports `PROGRAM_ID`, `TOKEN_MINT`, `TOKEN_DECIMALS`, `RPC_URL`, `getAddressUrl()` / `getTxUrl()` (Explorer link builders), and the three PDA-derivation helpers described in [4.3](#43-pda-seed-reference).
+Every write hook (`useCreateCampaign`, `useContribute`, `useWithdraw`, `useClaimRefund`) uses `getProgram()`, so a wallet must be connected before any of them can be called.
+
+```ts
+export function getReadOnlyProgram(connection?: Connection): CrowdfundingProgram {
+  const provider = new AnchorProvider(connection ?? getReadConnection(), READ_ONLY_WALLET, { commitment: 'confirmed' })
+  return new Program<Crowdfunding>(IDL, provider)
+}
+```
+
+Browsing shouldn't require a wallet — `.fetch()`/`.all()` never touch `provider.wallet`, so `getReadOnlyProgram()` uses a stub wallet that only throws if something ever tries to sign with it. This is what makes the home grid, a campaign's detail page, and "my campaigns" all load before you've connected anything. Built on top of it:
+
+```ts
+fetchAllCampaigns(connection?): Promise<ProgramAccountEntry<CampaignAccount>[]>
+fetchCampaign(campaignPda, connection?): Promise<CampaignAccount>
+fetchContributionsForCampaign(campaignPda, connection?): Promise<ProgramAccountEntry<ContributionAccount>[]>
+getCampaignStatus(campaign): 'active' | 'goalReached' | 'expired'
+```
+
+This same file also exports `PROGRAM_ID`, `TOKEN_MINT`, `TOKEN_DECIMALS`, `RPC_URL`, `getAddressUrl()` / `getTxUrl()` (Explorer link builders), and the three PDA-derivation helpers described in [4.3](#43-pda-seed-reference).
+
+### 5.3 Screens
+
+| Route | Component | Needs a wallet? |
+|---|---|---|
+| `/` | `CampaignGrid` | No — browse-only |
+| `/campaigns/create` | `CreateCampaignForm` | Yes, to submit (shows a connect prompt otherwise) |
+| `/campaigns/:address` | `CampaignDetail` | No to view; yes to contribute/withdraw/claim refund |
+| `/campaigns/mine` | `CampaignGrid` filtered by `creator` | Yes (shows a connect prompt otherwise) |
+| `/debug` | `WalletConnect` (raw console) | Yes, for everything — same as before this update |
+
+`CampaignGrid`'s tabs (All / Still Going / Goal Reached / Expired) and the "my campaigns" filter are both plain client-side filtering over one `fetchAllCampaigns()` call — there's no on-chain query language to filter server-side, so this is fine at devnet-demo scale but would need pagination/indexing (e.g. a real indexer or `getProgramAccounts` `dataSlice`) at real scale.
 
 ---
 
 ## 6. Read Functions
 
-`components/contract/ReadFunctions.tsx`. Solana has no "free view call" concept quite like Solidity's `view` functions, but reads here still cost nothing and need no signature — they're either a single account fetch or a filtered account scan, both served straight by the RPC node.
+Solana has no "free view call" concept quite like Solidity's `view` functions, but reads here still cost nothing and need no signature — they're either a single account fetch or a filtered account scan, both served straight by the RPC node, all wrapped by `getReadOnlyProgram()` (5.2) so no wallet needs to be connected.
 
-### 6.1 `getCampaign(address)`
+The main app consumes these through hooks (`hooks/useCampaigns.ts`, `useCampaign.ts`, `useContributions.ts`) that also subscribe to `store/transactionStore.ts`'s `refreshTrigger`, so `CampaignGrid`/`CampaignDetail` refetch automatically right after any write succeeds — no manual reload button anywhere. `components/contract/ReadFunctions.tsx` (rendered at `/debug`) calls the exact same underlying logic directly, with raw address inputs, for quick manual testing.
+
+### 6.1 `getCampaign(address)` — `useCampaign(address)`
 
 ```ts
 const c = await program.account.campaign.fetch(pda)
 ```
 Fetches and decodes one `Campaign` account by its PDA address (you get this address back from `createCampaign()`, or from `listMyCampaigns()` below).
 
-### 6.2 `getContributions(campaignAddress)`
+### 6.2 `getContributions(campaignAddress)` — `useContributions(address)`
 
 ```ts
 const discFilter = program.coder.accounts.memcmp('contribution')
@@ -277,17 +346,26 @@ const accounts = await connection.getProgramAccounts(program.programId, {
 ```
 There's no array to index into (unlike the old `getContributions(uint256) → tuple[]`), so this scans every account owned by the program whose first 8 bytes match the `Contribution` discriminator and whose `campaign` field (the 32 bytes right after that discriminator) matches the campaign you asked about.
 
-### 6.3 `listMyCampaigns()`
+### 6.3 `listMyCampaigns()` / "My Campaigns" (`/campaigns/mine`)
 
-Same `getProgramAccounts` + `memcmp` pattern, filtered on the `Campaign` discriminator and the connected wallet's pubkey in the `creator` field. This is the closest Solana equivalent to the old EVM `getCampaignCount()` + iterating every id — since there's no on-chain counter, "list mine" replaces "count all".
+`components/contract/ReadFunctions.tsx` (the `/debug` console) implements this with its own `getProgramAccounts` + `memcmp` call, filtered on the `Campaign` discriminator and the connected wallet's pubkey in the `creator` field.
+
+The main app's `/campaigns/mine` screen takes a simpler path: it calls `program.account.campaign.all()` via `fetchAllCampaigns()` (the exact same one-shot fetch that powers the home grid) and filters the result client-side by `account.creator.equals(wallet.publicKey)` — see `CampaignGrid`'s `onlyCreator` prop. Same end result, no separate on-chain query needed, since the full campaign list is already being fetched for the grid anyway. Either approach is the closest Solana equivalent to the old EVM `getCampaignCount()` + iterating every id — there's no on-chain counter, so "list mine" replaces "count all".
 
 ---
 
 ## 7. Write Functions
 
-`components/contract/WriteFunctions.tsx`. Every write here follows the same shape: user clicks → wallet prompts a signature → `.rpc()` sends the transaction and waits for confirmation → the signature (or an Anchor error) is shown in a result box.
+Every write follows the same shape: user clicks → wallet prompts a signature → `.rpc()` sends the transaction and waits for confirmation. In the main app this is wrapped by a hook per instruction (`hooks/useCreateCampaign.ts`, `useContribute.ts`, `useWithdraw.ts`, `useClaimRefund.ts`), each of which:
 
-### 7.1 `createCampaign(title, description, imageUrl, goal, durationDays)`
+1. calls `setPending(true, '...')` on `store/transactionStore.ts` — this is what makes `TransactionOverlay` appear over whichever screen triggered it;
+2. builds and sends the instruction via `getProgram()`;
+3. on success, calls `setPending(false)`, `triggerRefresh()` (so every visible list/detail view refetches), and shows a Sonner toast with a "View tx" action linking to Explorer;
+4. on failure, shows an error toast with Anchor's decoded message instead of throwing silently.
+
+`components/contract/WriteFunctions.tsx` (rendered at `/debug`) calls the same instructions directly with raw address/amount inputs and prints the signature (or `❌ ...` error) into an inline result box instead of a toast — useful for testing an instruction call in isolation.
+
+### 7.1 `createCampaign(title, description, imageUrl, goal, durationDays)` — `useCreateCampaign()`
 
 ```ts
 const campaignId = new BN(Date.now())
@@ -300,9 +378,9 @@ await program.methods
               tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY })
   .rpc()
 ```
-`campaign_id` is generated client-side (`Date.now()`) since nothing on-chain can hand one out. The resulting `campaignPda.toBase58()` is shown to the user — **save it**, it's what `contribute()`/`withdraw()`/`getCampaign()` all need as input.
+`campaign_id` is generated client-side (`Date.now()`) since nothing on-chain can hand one out. `useCreateCampaign()` returns the new `campaignPda.toBase58()`, and `CreateCampaignForm` immediately `router.push()`s to `/campaigns/:address` with it — no manual copy-pasting of the address needed in the main app (the `/debug` console still shows it as raw text, since it has no page to redirect to).
 
-### 7.2 `contribute(campaignAddress, amount)`
+### 7.2 `contribute(campaignAddress, amount)` — `useContribute()`
 
 ```ts
 const campaign = await program.account.campaign.fetch(campaignPda)   // read its token_mint first
@@ -317,13 +395,13 @@ await program.methods
 ```
 One click, one signature, one transaction — **no approve() step** (see [Section 8](#8-the-approve-step-that-no-longer-exists)).
 
-### 7.3 `withdraw(campaignAddress)`
+### 7.3 `withdraw(campaignAddress)` — `useWithdraw()`
 
-Creator-only, only after the goal is reached; transfers the whole vault balance to the creator's associated token account (created on the fly if it doesn't exist yet).
+Creator-only, only after the goal is reached; transfers the whole vault balance to the creator's associated token account (created on the fly if it doesn't exist yet). On `CampaignDetail`, the "Withdraw Funds" button only renders when `getCampaignStatus(campaign) === 'goalReached'`, `!campaign.withdrawn`, and the connected wallet equals `campaign.creator` — the on-chain checks are still the real gate, this just avoids showing a button that would only fail.
 
-### 7.4 `claimRefund(campaignAddress)`
+### 7.4 `claimRefund(campaignAddress)` — `useClaimRefund()`
 
-Any contributor, only after the deadline passes on a campaign that missed its goal; returns exactly what that wallet put in.
+Any contributor, only after the deadline passes on a campaign that missed its goal; returns exactly what that wallet put in. `CampaignDetail` shows "Claim Refund" only when the connected wallet has a `Contribution` for this campaign, the campaign's status is `'expired'`, and that contribution isn't already refunded.
 
 ---
 
@@ -343,52 +421,58 @@ SPL tokens don't have an ERC-20-style allowance/`transferFrom` model. A transfer
 
 ## 9. Wallet Connect
 
-`components/Providers.tsx` + `components/WalletConnect.tsx` replace the old Reown AppKit + `ethers.BrowserProvider` setup.
+`components/Providers.tsx` + `components/Navbar.tsx` + `components/WalletButton.tsx` replace the old Reown AppKit + `ethers.BrowserProvider` setup. (`components/WalletConnect.tsx` is the original full-page version of this, kept only for `/debug`.)
 
-- **Provider setup**: `ConnectionProvider` (holds the RPC `Connection`) → `WalletProvider` (holds the connected wallet, `wallets={[]}` because modern wallets self-register via the Wallet Standard — Phantom/Solflare/Backpack/etc. all show up automatically without listing individual adapter packages) → `WalletModalProvider` (the connect-wallet UI modal). All three are rendered via `dynamic(..., { ssr: false })` in `app/layout.tsx`, same SSR-avoidance pattern the old AppKit setup used, because wallet adapters touch `window`/`indexedDB`.
-- **Connecting**: `useWalletModal().setVisible(true)` opens the wallet picker; once connected, `useWallet()` gives you `publicKey`, `connected`, `disconnect()` directly — there's no separate "raw EIP-1193 provider" concept to plumb through props the way `useAppKitProvider('eip155')` was needed before. `ReadFunctions`/`WriteFunctions` call the wallet-adapter hooks themselves instead of receiving a `walletProvider` prop.
+- **Provider setup**: `ConnectionProvider` (holds the RPC `Connection`) → `WalletProvider` (holds the connected wallet, `wallets={[]}` because modern wallets self-register via the Wallet Standard — Phantom/Solflare/Backpack/etc. all show up automatically without listing individual adapter packages) → `WalletModalProvider` (the connect-wallet UI modal), which also renders `<TransactionOverlay/>` and the Sonner `<Toaster/>` for the whole app. All of this is rendered via `dynamic(..., { ssr: false })` in `app/layout.tsx`, same SSR-avoidance pattern the old AppKit setup used, because wallet adapters touch `window`/`indexedDB`. `<Navbar/>` is rendered as a sibling of `{children}` inside that same `Providers` tree, so `WalletButton` can use `useWallet()`/`useConnection()` directly.
+- **Connecting**: `useWalletModal().setVisible(true)` opens the wallet picker; once connected, `useWallet()` gives you `publicKey`, `connected`, `disconnect()` directly — there's no separate "raw EIP-1193 provider" concept to plumb through props the way `useAppKitProvider('eip155')` was needed before. Every hook and component calls the wallet-adapter hooks itself instead of receiving a `walletProvider` prop.
 - **Buffer polyfill**: `@solana/web3.js` expects a global `Buffer`; Next.js doesn't polyfill Node globals in the browser, so `Providers.tsx` sets `window.Buffer = require('buffer').Buffer` once on mount.
-- **Balance display**: `connection.getBalance(publicKey)` (lamports → SOL) is shown next to the truncated address; clicking it disconnects (wallet-adapter has no built-in "account" modal to open instead).
+- **Wallet chip vs. old click-to-disconnect**: `WalletButton` shows `{balance} SOL · {truncated address}` in the Navbar; clicking it opens a small dialog (Explorer link + a separate "Disconnect" button) instead of disconnecting on the first click the way the old single chip did — harder to disconnect by accident. `WalletConnect.tsx` (still used at `/debug`) keeps the original single-click-to-disconnect chip.
 
 ---
 
 ## 10. Complete End-to-End Flow
 
 ```
- 1. User opens the app
-       → not connected → "Connect Wallet" button (WalletConnect.tsx)
+ 1. User opens the app at "/"
+       → CampaignGrid loads immediately via fetchAllCampaigns() — no wallet needed to browse
+       → tabs: All Campaigns / Still Going / Goal Reached / Expired
+       → empty state points at "/campaigns/create" if there's nothing yet
 
- 2. Click "Connect Wallet"
+ 2. Connect a wallet (top-right WalletButton, any screen)
        → useWalletModal().setVisible(true) opens the wallet picker
        → user picks Phantom/Solflare/etc., approves the connection in their extension
        → useWallet() now returns publicKey + connected=true
-       → SOL balance is fetched and shown next to the address
+       → SOL balance is fetched and shown in the Navbar chip
 
- 3. Create a campaign (WriteFunctions → createCampaign)
-       → user fills title / description / image URL / goal / duration
+ 3. Create a campaign — "/campaigns/create" (CreateCampaignForm → useCreateCampaign)
+       → zod validates title/description/imageUrl/goal/duration client-side first
        → campaign_id = Date.now() picked client-side
        → campaign + vault PDAs derived
        → single signed transaction: creates both PDAs, sets goal/deadline
-       → returned campaign PDA address is shown — save it, it's the campaign's "id" from here on
+       → TransactionOverlay shows while signing; on success, a toast fires and the
+         page redirects straight to "/campaigns/:address" — no address to copy by hand
 
- 4. Contribute (WriteFunctions → contribute)
-       → paste the campaign PDA address + an amount
+ 4. Contribute — on a campaign's detail page (CampaignDetail → useContribute)
+       → only shown while the campaign's status is "active"
        → program fetches the campaign to find its token_mint
        → contributor's associated token account is derived
        → single signed transaction moves tokens contributor → vault directly (no approve)
-       → campaign.raised and contributors_count update on-chain immediately
+       → campaign.raised / contributorsCount update on screen immediately — every open
+         screen refetches automatically via the shared refreshTrigger, no manual reload
 
- 5a. Once raised >= goal: creator can withdraw (WriteFunctions → withdraw)
-       → only the creator's wallet can call this (has_one = creator)
+ 5a. Once raised >= goal: the creator sees a "Withdraw Funds" button on the detail page
+       → only rendered for the connected wallet that matches campaign.creator
        → vault's entire balance moves to the creator's token account
-       → withdrawn flips to true — can only happen once
+       → withdrawn flips to true — can only happen once, button disappears after
 
- 5b. If the deadline passes with raised < goal: any contributor can claim a refund
-       → (WriteFunctions → claimRefund)
+ 5b. If the deadline passes with raised < goal: any contributor with an unrefunded
+     contribution sees a "Claim Refund" button on the same detail page
        → refunds exactly what that wallet put in, marks their Contribution.refunded
 
- Throughout: ReadFunctions.getCampaign() / getContributions() / listMyCampaigns()
- let anyone inspect state at any time — no wallet signature or fee required.
+ Throughout: "/" and "/campaigns/mine" (filtered to the connected wallet) let anyone
+ browse campaign state at any time — no wallet signature or fee required to look.
+ The "/debug" console still exposes every instruction as a raw address/amount form,
+ for testing outside the guided screens.
 ```
 
 ---
@@ -422,6 +506,8 @@ To point this frontend at a **freshly redeployed** program (new program id / new
 | Contribute fails because the token account doesn't exist | Wallet has never held the campaign's SPL token | Acquire some of the token first (e.g. via the mint's own faucet/mint-to script in `../solana-rust/01-spl-token-deploy`) |
 | `ConnectionProvider cannot be used as a JSX component` (build-time only) | A transitive dependency (`@solana-mobile/wallet-adapter-mobile` → `react-native`) pulls in a conflicting `@types/react` | Already fixed via the `overrides` + exact-pinned `devDependencies` in `package.json` — don't remove those if you touch deps |
 | `no method named 'source_file'`... during `anchor build` (only relevant if rebuilding the Rust program) | `anchor-lang@0.30.1` vs a newer `proc-macro2` | Use `anchor build --no-idl` — the `.so` build is unaffected, only IDL generation is skipped |
+| `bigint: Failed to load bindings, pure JS will be used (try npm run rebuild?)` in the dev/build console | `@solana/web3.js`'s `bigint-buffer` dependency has no prebuilt native binary for your platform | Harmless — it falls back to a pure-JS implementation automatically. No action needed. |
+| A wall of `404`s / "Fast Refresh had to perform a full reload" right after deleting `.next` or switching branches | Next.js's dev server cache was invalidated and is recompiling from scratch | Wait for the next request to finish (`GET / 200` in the terminal) and refresh the browser — self-resolves, not a real bug |
 
 ---
 
@@ -431,7 +517,12 @@ To point this frontend at a **freshly redeployed** program (new program id / new
 ```ts
 PROGRAM_ID, TOKEN_MINT, TOKEN_DECIMALS, RPC_URL, EXPLORER_CLUSTER
 getReadConnection(): Connection
-getProgram(wallet, connection): Program<Crowdfunding>
+getProgram(wallet, connection): Program<Crowdfunding>              // signing client
+getReadOnlyProgram(connection?): Program<Crowdfunding>              // no wallet needed
+fetchAllCampaigns(connection?): Promise<ProgramAccountEntry<CampaignAccount>[]>
+fetchCampaign(campaignPda, connection?): Promise<CampaignAccount>
+fetchContributionsForCampaign(campaignPda, connection?): Promise<ProgramAccountEntry<ContributionAccount>[]>
+getCampaignStatus(campaign): 'active' | 'goalReached' | 'expired'
 getContributorTokenAccount(mint, owner): PublicKey
 deriveCampaignPda(creator, campaignId): [PublicKey, number]
 deriveVaultPda(campaign): [PublicKey, number]
@@ -447,12 +538,53 @@ formatDate(unixSeconds): string
 display(value): string                                  // JSON.stringify with BN support, for result boxes
 ```
 
+**`lib/utils.ts`** (all BN-aware — accept `BN | bigint | number`)
+```ts
+cn(...inputs): string
+truncateAddress(address, start?, end?): string
+getProgress(raised, goal): number          // 0-100
+getDaysLeft(deadline): number
+timeAgo(timestamp): string
+isValidTokenAmount(amount: string): boolean
+```
+
+**`lib/validations.ts`**
+```ts
+createCampaignSchema: ZodSchema<CreateCampaignFormData>   // title/description/imageUrl/goal/durationDays
+contributeSchema: ZodSchema<ContributeFormData>            // amount
+```
+
 **Program instructions (via `program.methods.*`)**
 ```ts
 createCampaign(campaignId: BN, title: string, description: string, imageUrl: string, goal: BN, durationDays: BN)
 contribute(amount: BN)
 withdraw()
 claimRefund()
+```
+
+**Read hooks** (no wallet required, all subscribe to `refreshTrigger`)
+```ts
+useCampaigns(): { campaigns, isLoading, isError, error, refetch }
+useCampaign(address): { campaign, publicKey, isLoading, isError, error, refetch }
+useContributions(campaignAddress): { contributions, isLoading, isError, refetch }
+```
+
+**Write hooks** (wallet required — each shows the TransactionOverlay + a toast)
+```ts
+useCreateCampaign(): { createCampaign(input): Promise<string|null>, isSubmitting }  // returns new campaign address
+useContribute(): { contribute(campaignAddress, amount): Promise<boolean>, isSubmitting }
+useWithdraw(): { withdraw(campaignAddress): Promise<boolean>, isSubmitting }
+useClaimRefund(): { claimRefund(campaignAddress): Promise<boolean>, isSubmitting }
+```
+
+**`store/transactionStore.ts`** (zustand)
+```ts
+useTransactionStore(): {
+  isPending, message, txSignature,
+  refreshTrigger,                 // bump via triggerRefresh() → every read hook refetches
+  setPending(isPending, message?, txSignature?),
+  triggerRefresh(),
+}
 ```
 
 **Wallet-adapter hooks used**
